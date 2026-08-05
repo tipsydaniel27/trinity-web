@@ -1,0 +1,124 @@
+name: Renew Chronicles
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    - cron: "0 22 * * *"
+      timezone: "Asia/Manila"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: renew-chronicles
+  cancel-in-progress: false
+
+jobs:
+  renew:
+    name: Renew Chronicle Files
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Open repository
+        uses: actions/checkout@v4
+
+      - name: Prepare Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Renew chronicles
+        env:
+          TZ: Asia/Manila
+        run: npm run update:chronicles
+
+      - name: Validate chronicle files
+        run: |
+          node --input-type=module <<'EOF'
+          import { readFile } from "node:fs/promises";
+
+          const seals = [42, 45, 49, 55, 58];
+
+          for (const seal of seals) {
+            const filePath = `public/chronicles/${seal}.json`;
+            const rawText = await readFile(filePath, "utf8");
+            const entries = JSON.parse(rawText);
+
+            if (!Array.isArray(entries)) {
+              throw new Error(`${filePath} is not a passage list.`);
+            }
+
+            if (entries.length < 2) {
+              throw new Error(`${filePath} contains fewer than two passages.`);
+            }
+
+            for (const [index, entry] of entries.entries()) {
+              if (
+                typeof entry !== "object" ||
+                entry === null ||
+                typeof entry.date !== "string" ||
+                !Array.isArray(entry.numbers) ||
+                entry.numbers.length !== 6
+              ) {
+                throw new Error(
+                  `${filePath}, passage ${index + 1}, is incomplete.`,
+                );
+              }
+
+              if (
+                new Set(entry.numbers).size !== 6 ||
+                entry.numbers.some(
+                  (number) =>
+                    !Number.isInteger(number) ||
+                    number < 1 ||
+                    number > seal,
+                )
+              ) {
+                throw new Error(
+                  `${filePath}, passage ${index + 1}, contains invalid marks.`,
+                );
+              }
+            }
+
+            console.log(
+              `${filePath}: ${entries.length.toLocaleString()} valid passages`,
+            );
+          }
+          EOF
+
+      - name: Build Trinity
+        run: npm run build
+
+      - name: Detect changes
+        id: changes
+        shell: bash
+        run: |
+          if git diff --quiet -- public/chronicles; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No new chronicle changes were found."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Chronicle changes were found."
+            git diff --stat -- public/chronicles
+          fi
+
+      - name: Commit renewed chronicles
+        if: steps.changes.outputs.changed == 'true'
+        shell: bash
+        run: |
+          git config user.name "Trinity Chronicle Keeper"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add public/chronicles/*.json
+          git commit -m "Renew chronicles $(TZ=Asia/Manila date +'%Y-%m-%d %H:%M PHT')"
+          git push
+
+      - name: No renewal needed
+        if: steps.changes.outputs.changed == 'false'
+        run: echo "The chronicles are already current."
